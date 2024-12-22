@@ -54,7 +54,7 @@ if __name__ == "__main__":
   best_error = 999999
   phases = ["train", "test"]
   metrics = ["Loss", "RMSE", "MAE"]
-  metrics = {metric: {phase: []} for phase in phases for metric in metrics}
+  metrics = {metric: {phase: [] for phase in phases} for metric in metrics}
 
   for epoch in range(1, train_config["num_epochs"] + 1):
     print("-" * 20)
