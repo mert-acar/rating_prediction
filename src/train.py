@@ -37,18 +37,14 @@ if __name__ == "__main__":
     "test": pd.read_csv(os.path.join(train_config["data_path"], "test_df.csv")),
   }
 
-  # Store original ratings (1-10) for classification
-  for phase in datasets:
-    datasets[phase]['original_rating'] = datasets[phase]['rating']
-    datasets[phase]['rating'] = (datasets[phase]['rating'] - 1) / 9.0
+  rating_counts = list(datasets['train']['rating'].value_counts().sort_index())
+  total_samples = len(datasets['train'])
+  weights = torch.FloatTensor([total_samples/(10 * rating_counts[i]) for i in range(10)]).to(device)
 
   model = RatingPredictor(**config["model"]).to(device)
-  model.freeze_embedding_model()
+  model.freeze_embedding_model(-2)
 
-  # Loss functions
-  regression_criterion = torch.nn.HuberLoss(delta=1.0)
-  classification_criterion = torch.nn.CrossEntropyLoss()
-  
+  criterion = torch.nn.HuberLoss(delta=1.0, reduction='none')
   optimizer = torch.optim.AdamW(model.parameters(), **train_config["optimizer_args"])
   scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, **train_config["scheduler_args"]
@@ -58,75 +54,63 @@ if __name__ == "__main__":
   best_epoch = -1
   best_error = 999999
   phases = ["train", "test"]
-  metrics = ["Loss", "RMSE", "MAE", "Accuracy"]
+  metrics = ["Loss", "RMSE", "MAE"]
   metrics = {metric: {phase: [] for phase in phases} for metric in metrics}
 
   for epoch in range(1, train_config["num_epochs"] + 1):
     print("-" * 20)
     print(f"Epoch {epoch} / {train_config['num_epochs']}")
-    for phase in ["train", "test"]:
+    for phase in phases:
+      dataset = datasets[phase]
       if phase == "train":
         model.train()
+        dataset = dataset.sample(frac=1).reset_index(drop=True)
       else:
         model.eval()
+
       running_error = 0
       running_mae = 0
       running_rmse = 0
-      running_acc = 0
-      dataset = datasets[phase]
-
-      if phase == "train":
-        dataset = dataset.sample(frac=1).reset_index(drop=True)
-
       pbar = tqdm(range(0, len(dataset), train_config["batch_size"]), ncols=94)
       with torch.set_grad_enabled(phase == "train"):
         for i in pbar:
           batch = dataset.iloc[i:i + train_config["batch_size"]]
-          x = batch["review_text"].tolist()
-          y_reg = torch.from_numpy(batch["rating"].to_numpy()).float().to(device)
-          y_cls = torch.from_numpy(batch["original_rating"].to_numpy()).long().to(device) - 1  # 0-9 for CrossEntropyLoss
+          reviews = batch["review_text"].tolist()
+          features = torch.from_numpy(batch.drop(["review_text", "rating"], axis=1).to_numpy()).float().to(device)
+          y = torch.from_numpy(batch["rating"].to_numpy()).long().to(device)
 
           optimizer.zero_grad()
-          reg_out, cls_out = model(x)
-          reg_out = reg_out.squeeze()
+          out = model(reviews, features)
+          out = out.squeeze()
 
-          # Calculate losses
-          reg_loss = regression_criterion(reg_out, y_reg)
-          cls_loss = classification_criterion(cls_out, y_cls)
-          
-          # Combined loss (equal weighting)
-          loss = reg_loss + cls_loss
+          # Weighted loss
+          loss = criterion(out, (y - 1) / 9)
+          sample_weights = weights[y - 1]
+          loss = (loss * sample_weights).mean()
 
           if phase == "train":
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
           # Calculate metrics
-          mae = torch.abs((reg_out * 9) + 1 - ((y_reg * 9) + 1)).mean()
-          rmse = torch.sqrt((((reg_out * 9) + 1 - ((y_reg * 9) + 1)) ** 2).mean())
-          acc = (cls_out.argmax(dim=1) == y_cls).float().mean()
-          
+          out = out * 9 + 1
+          mae = torch.abs(out - y).mean()
+          rmse = torch.sqrt(((out - y)**2).mean())
           running_error += loss.item()
           running_mae += mae.item()
           running_rmse += rmse.item()
-          running_acc += acc.item()
-          
-          pbar.set_description(f"L:{loss.item():.3f}|MAE:{mae:.2f}|ACC:{acc:.2f}")
+          pbar.set_description(f"Loss: {loss.item():.3f} | MAE: {mae:.2f}")
 
-      # Average metrics
       num_batches = len(pbar)
       running_error /= num_batches
       running_mae /= num_batches
       running_rmse /= num_batches
-      running_acc /= num_batches
-      
-      print(f"Loss: {running_error:.5f} | MAE: {running_mae:.3f} | RMSE: {running_rmse:.3f} | ACC: {running_acc:.3f}")
-      
+      print(f"Loss: {running_error:.5f} | MAE: {running_mae:.3f} | RMSE: {running_rmse:.3f}")
       metrics["Loss"][phase].append(running_error)
       metrics["MAE"][phase].append(running_mae)
       metrics["RMSE"][phase].append(running_rmse)
-      metrics["Accuracy"][phase].append(running_acc)
+
       if phase == "test":
         scheduler.step(running_error)
         if running_error < best_error:

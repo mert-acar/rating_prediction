@@ -2,3 +2,4 @@ data/
 logs/
 src/__pycache__/
 pyproject.toml
+src/bench.py

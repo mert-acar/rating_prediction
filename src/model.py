@@ -13,30 +13,15 @@ class RatingPredictor(torch.nn.Module):
     super().__init__()
     self.tokenizer = AutoTokenizer.from_pretrained(encoding_model)
     self.encoding_model = AutoModel.from_pretrained(encoding_model)
+
     if in_dim is None:
-      in_dim = self.encoding_model.config.hidden_size
+      in_dim = self.encoding_model.config.hidden_size + 9
 
     # Shared layers
-    self.shared = torch.nn.Sequential(
-      torch.nn.Linear(in_dim, 64),
-      torch.nn.ReLU(),
-      torch.nn.Dropout(0.5)
-    )
-    
-    # Regression head for exact rating
     self.regression_head = torch.nn.Sequential(
-      torch.nn.Linear(64, 1),
+      torch.nn.Linear(in_dim, 64), torch.nn.ReLU(), torch.nn.Dropout(0.2), torch.nn.Linear(64, 1),
       torch.nn.Sigmoid()
     )
-    
-    # Classification head for rating classes (1-10)
-    self.classification_head = torch.nn.Linear(64, 10)
-
-    # Initialize weights
-    for m in self.modules():
-      if isinstance(m, torch.nn.Linear):
-        torch.nn.init.xavier_normal_(m.weight, gain=0.1)
-        torch.nn.init.constant_(m.bias, 0)
 
   def _mean_pooling(self, model_output, attention_mask):
     token_embeddings = model_output[0]
@@ -45,14 +30,21 @@ class RatingPredictor(torch.nn.Module):
       input_mask_expanded.sum(1), min=1e-9
     )
 
-  def freeze_embedding_model(self):
+  def freeze_embedding_model(self, freeze_until: Optional[int] = None):
     for p in self.encoding_model.parameters():
       p.requires_grad = False
+
+    if freeze_until is not None:
+      for layer in self.encoding_model.encoder.layer[freeze_until:]:
+        for param in layer.parameters():
+          param.requires_grad = True
+      for param in self.encoding_model.pooler.parameters():
+        param.requires_grad = True
 
   def get_device(self):
     return next(self.parameters()).device
 
-  def forward(self, review: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
+  def forward(self, review: List[str], features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     device = self.get_device()
     encoded_str = self.tokenizer(
       review, padding=True, truncation=True, return_tensors='pt'
@@ -60,9 +52,5 @@ class RatingPredictor(torch.nn.Module):
     out = self.encoding_model(**encoded_str)
     embeddings = self._mean_pooling(out, encoded_str["attention_mask"])
     embeddings = F.normalize(embeddings, p=2, dim=1)
-    
-    shared_features = self.shared(embeddings)
-    regression_out = self.regression_head(shared_features)
-    classification_logits = self.classification_head(shared_features)
-    
-    return regression_out, classification_logits
+    feat = torch.cat([features, embeddings], dim=1)
+    return self.regression_head(feat)

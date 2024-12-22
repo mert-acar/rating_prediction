@@ -17,7 +17,7 @@ training:
   num_epochs: 10000
   early_stop_patience: 10
   optimizer_args:
-    lr: 0.0005  # Reduced learning rate for more stable multi-task training
+    lr: 0.005  # Reduced learning rate for more stable multi-task training
     weight_decay: 0.01  # Increased weight decay for better regularization
   scheduler_args:
     factor: 0.5 
