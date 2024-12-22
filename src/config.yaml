@@ -13,13 +13,13 @@ model:
 training:
   data_path: ../data/feat_text/
   device: mps
-  batch_size: 8  # Reduced batch size for better generalization
+  batch_size: 64
   num_epochs: 10000
   early_stop_patience: 10
   optimizer_args:
-    lr: 0.005  # Reduced learning rate for more stable multi-task training
-    weight_decay: 0.01  # Increased weight decay for better regularization
+    lr: 0.005
+    weight_decay: 0.01
   scheduler_args:
     factor: 0.5 
-    patience: 5  # Increased patience for learning rate reduction
-  output_path: ../logs/experiment_1
+    patience: 5
+  output_path: ../logs/experiment_8
