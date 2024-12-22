@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from transformers import AutoTokenizer, AutoModel
 
 
@@ -16,17 +16,24 @@ class RatingPredictor(torch.nn.Module):
     if in_dim is None:
       in_dim = self.encoding_model.config.hidden_size
 
-    # Simpler classifier with one hidden layer and stronger regularization
-    self.classifier = torch.nn.Sequential(
+    # Shared layers
+    self.shared = torch.nn.Sequential(
       torch.nn.Linear(in_dim, 64),
       torch.nn.ReLU(),
-      torch.nn.Dropout(0.5),  # Increased dropout
+      torch.nn.Dropout(0.5)
+    )
+    
+    # Regression head for exact rating
+    self.regression_head = torch.nn.Sequential(
       torch.nn.Linear(64, 1),
       torch.nn.Sigmoid()
     )
+    
+    # Classification head for rating classes (1-10)
+    self.classification_head = torch.nn.Linear(64, 10)
 
-    # Initialize weights with smaller values
-    for m in self.classifier.modules():
+    # Initialize weights
+    for m in self.modules():
       if isinstance(m, torch.nn.Linear):
         torch.nn.init.xavier_normal_(m.weight, gain=0.1)
         torch.nn.init.constant_(m.bias, 0)
@@ -45,7 +52,7 @@ class RatingPredictor(torch.nn.Module):
   def get_device(self):
     return next(self.parameters()).device
 
-  def forward(self, review: List[str]) -> torch.Tensor:
+  def forward(self, review: List[str]) -> Tuple[torch.Tensor, torch.Tensor]:
     device = self.get_device()
     encoded_str = self.tokenizer(
       review, padding=True, truncation=True, return_tensors='pt'
@@ -53,4 +60,9 @@ class RatingPredictor(torch.nn.Module):
     out = self.encoding_model(**encoded_str)
     embeddings = self._mean_pooling(out, encoded_str["attention_mask"])
     embeddings = F.normalize(embeddings, p=2, dim=1)
-    return self.classifier(embeddings)
+    
+    shared_features = self.shared(embeddings)
+    regression_out = self.regression_head(shared_features)
+    classification_logits = self.classification_head(shared_features)
+    
+    return regression_out, classification_logits

@@ -1,6 +1,7 @@
 import os
 import torch
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
 from time import time
 from yaml import full_load
@@ -36,33 +37,19 @@ if __name__ == "__main__":
     "test": pd.read_csv(os.path.join(train_config["data_path"], "test_df.csv")),
   }
 
-  # Undersample the training data
-  train_df = datasets["train"]
-  # Find the size of the smallest class
-  min_class_size = train_df['rating'].value_counts().min()
-  
-  # Sample equally from each rating class
-  balanced_dfs = []
-  for rating in range(1, 11):
-      class_df = train_df[train_df['rating'] == rating]
-      sampled_df = class_df.sample(n=min_class_size, random_state=42)
-      balanced_dfs.append(sampled_df)
-  
-  # Combine all balanced samples
-  datasets["train"] = pd.concat(balanced_dfs).sample(frac=1, random_state=42).reset_index(drop=True)
-  print(f"[INFO] Balanced training set size: {len(datasets['train'])}")
-  print("[INFO] Rating distribution after balancing:")
-  print(datasets["train"]['rating'].value_counts().sort_index())
-
+  # Store original ratings (1-10) for classification
   for phase in datasets:
+    datasets[phase]['original_rating'] = datasets[phase]['rating']
     datasets[phase]['rating'] = (datasets[phase]['rating'] - 1) / 9.0
 
   model = RatingPredictor(**config["model"]).to(device)
   model.freeze_embedding_model()
 
-  criterion = torch.nn.HuberLoss(delta=1.0, reduction='none')
+  # Loss functions
+  regression_criterion = torch.nn.HuberLoss(delta=1.0)
+  classification_criterion = torch.nn.CrossEntropyLoss()
+  
   optimizer = torch.optim.AdamW(model.parameters(), **train_config["optimizer_args"])
-
   scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, **train_config["scheduler_args"]
   )
@@ -71,7 +58,7 @@ if __name__ == "__main__":
   best_epoch = -1
   best_error = 999999
   phases = ["train", "test"]
-  metrics = ["Loss", "RMSE", "MAE"]
+  metrics = ["Loss", "RMSE", "MAE", "Accuracy"]
   metrics = {metric: {phase: [] for phase in phases} for metric in metrics}
 
   for epoch in range(1, train_config["num_epochs"] + 1):
@@ -85,6 +72,7 @@ if __name__ == "__main__":
       running_error = 0
       running_mae = 0
       running_rmse = 0
+      running_acc = 0
       dataset = datasets[phase]
 
       if phase == "train":
@@ -95,31 +83,50 @@ if __name__ == "__main__":
         for i in pbar:
           batch = dataset.iloc[i:i + train_config["batch_size"]]
           x = batch["review_text"].tolist()
-          y = torch.from_numpy(batch["rating"].to_numpy()).float().to(device)
-          optimizer.zero_grad()
-          out = model(x)
-          out = out.squeeze()
+          y_reg = torch.from_numpy(batch["rating"].to_numpy()).float().to(device)
+          y_cls = torch.from_numpy(batch["original_rating"].to_numpy()).long().to(device) - 1  # 0-9 for CrossEntropyLoss
 
-          loss = criterion(out, y)
+          optimizer.zero_grad()
+          reg_out, cls_out = model(x)
+          reg_out = reg_out.squeeze()
+
+          # Calculate losses
+          reg_loss = regression_criterion(reg_out, y_reg)
+          cls_loss = classification_criterion(cls_out, y_cls)
+          
+          # Combined loss (equal weighting)
+          loss = reg_loss + cls_loss
+
           if phase == "train":
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-          mae = torch.abs((out * 9) + 1 - ((y * 9) + 1)).mean()
-          rmse = torch.sqrt((((out * 9) + 1 - ((y * 9) + 1)) ** 2).mean())
+          # Calculate metrics
+          mae = torch.abs((reg_out * 9) + 1 - ((y_reg * 9) + 1)).mean()
+          rmse = torch.sqrt((((reg_out * 9) + 1 - ((y_reg * 9) + 1)) ** 2).mean())
+          acc = (cls_out.argmax(dim=1) == y_cls).float().mean()
+          
           running_error += loss.item()
           running_mae += mae.item()
           running_rmse += rmse.item()
-          pbar.set_description(f"{loss.item():.5f} | {mae:.3f} | {rmse:.3f}")
+          running_acc += acc.item()
+          
+          pbar.set_description(f"L:{loss.item():.3f}|MAE:{mae:.2f}|ACC:{acc:.2f}")
 
-      running_error = running_error / len(pbar)
-      running_mae = running_mae / len(pbar)
-      running_rmse = running_rmse / len(pbar)
-      print(f"Loss: {running_error:.5f} | MAE: {running_mae:.3f} | RMSE: {running_rmse:.3f}")
+      # Average metrics
+      num_batches = len(pbar)
+      running_error /= num_batches
+      running_mae /= num_batches
+      running_rmse /= num_batches
+      running_acc /= num_batches
+      
+      print(f"Loss: {running_error:.5f} | MAE: {running_mae:.3f} | RMSE: {running_rmse:.3f} | ACC: {running_acc:.3f}")
+      
       metrics["Loss"][phase].append(running_error)
       metrics["MAE"][phase].append(running_mae)
       metrics["RMSE"][phase].append(running_rmse)
+      metrics["Accuracy"][phase].append(running_acc)
       if phase == "test":
         scheduler.step(running_error)
         if running_error < best_error:
@@ -140,7 +147,7 @@ if __name__ == "__main__":
   h, m = divmod(m, 60)
   print(f"Training took {int(h):d} hours {int(m):d} minutes {s:.2f} seconds.")
 
-  fig, axs = plt.subplots(1, len(metrics), tight_layout=True, figsize=(10, 5))
+  fig, axs = plt.subplots(1, len(metrics), tight_layout=True, figsize=(15, 5))
   epochs = list(range(1, epoch + 1))
   for i, (metric, arr) in enumerate(metrics.items()):
     for phase, val in arr.items():
