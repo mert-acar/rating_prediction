@@ -13,11 +13,11 @@ model:
 training:
   data_path: ../data/feat_text/
   device: mps
-  batch_size: 16
+  batch_size: 64
   num_epochs: 10000
   early_stop_patience: 10
   optimizer_args:
-    lr: 0.001 
+    lr: 0.002 
     weight_decay: 0.001
   scheduler_args:
     factor: 0.5 

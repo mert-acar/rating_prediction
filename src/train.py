@@ -39,10 +39,15 @@ if __name__ == "__main__":
   for phase in datasets:
     datasets[phase]['rating'] = (datasets[phase]['rating'] - 1) / 9.0
 
+  # Calculate weights for each rating
+  rating_counts = datasets['train']['rating'].value_counts()
+  total_samples = len(datasets['train'])
+  weights = torch.FloatTensor([total_samples/(10 * rating_counts[i]) for i in range(1, 11)]).to(device)
+
   model = RatingPredictor(**config["model"]).to(device)
   model.freeze_embedding_model()
 
-  criterion = torch.nn.HuberLoss(delta=1.0)
+  criterion = torch.nn.HuberLoss(delta=1.0, reduction='none')
   optimizer = torch.optim.AdamW(model.parameters(), **train_config["optimizer_args"])
 
   scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -83,9 +88,13 @@ if __name__ == "__main__":
           out = out.squeeze()
 
           loss = criterion(out, y)
+          # Get the original ratings (1-10) for weight indexing
+          original_ratings = (y * 9 + 1).long() - 1
+          sample_weights = weights[original_ratings]
+          loss = (loss * sample_weights).mean()
           if phase == "train":
             loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
           mae = torch.abs((out * 9) + 1 - ((y * 9) + 1)).mean()
