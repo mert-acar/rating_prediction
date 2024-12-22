@@ -1,0 +1,25 @@
+dataset:
+  test_size: 0.2
+  random_state: 9001
+  discount_bins: [0.0, 0.2, 0.6, 1.0]
+  top_categories: ['Sports & Outdoors', 'Health & Personal Care', 'AMAZON FASHION']
+  price_stats:
+    mean: 3.16547
+    std: 0.74346
+
+model:
+  encoding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  
+training:
+  data_path: ../data/feat_text/
+  device: mps
+  batch_size: 16
+  num_epochs: 10000
+  early_stop_patience: 10
+  optimizer_args:
+    lr: 0.001 
+    weight_decay: 0.001
+  scheduler_args:
+    factor: 0.5 
+    patience: 3
+  output_path: ../logs/experiment_1
