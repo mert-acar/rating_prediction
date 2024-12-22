@@ -20,7 +20,7 @@ def test(model: torch.nn.Module, dataset: pd.DataFrame, device: str = "mps") -> 
     with torch.inference_mode():
       out = model(x)
     out = (out.squeeze() * 9) + 1
-    predictions.append(torch.round(out))
+    predictions.append(torch.round(out).view(1,1))
     mae += torch.abs(out - ((y * 9) + 1)).mean()
     rmse += torch.sqrt(((out - ((y * 9) + 1))**2).mean())
   mae /= len(pbar)
