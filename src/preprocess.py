@@ -1,12 +1,15 @@
 import os
 import re
-import torch
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from sklearn.model_selection import train_test_split
 from typing import Tuple, Union, Optional, List, Dict
+from sentence_transformers import SentenceTransformer
 
+# TODO:
+# + Dont normalize the embeddings
+# + PCA on the embeddings
 
 @dataclass(frozen=True)
 class DatasetConfig:
@@ -16,18 +19,22 @@ class DatasetConfig:
   discount_bins: List[float]
   top_categories: List[str]
   price_stats: Dict[str, float]
+  embedding_model: str
 
 
 class PreprocessPipeline:
   """Handles feature transformation for both training and inference."""
-  def __init__(self, config: Optional[DatasetConfig] = None, device: Optional[str] = None):
+  def __init__(self, config: Optional[DatasetConfig] = None):
     self.config = config or DatasetConfig()
-    self.device = device or torch.device("cuda" if torch.cuda.is_available() else "mps")
+    self.embedding_model = SentenceTransformer(self.config.embedding_model)
 
   def _transform_price(self, price: float) -> float:
     """Transform price using log transformation and standardization."""
-    log_price = (np.log1p(price) - self.config.price_stats["mean"]) / self.config.price_stats["std"]
-    return log_price.astype(np.float32)
+    p = (np.log1p(price) - self.config.price_stats["min"]) / (
+      self.config.price_stats["max"] - self.config.price_stats["min"]
+    )
+    return p * 2 - 1
+    # return (np.log1p(price) - self.config.price_stats["mean"]) / self.config.price_stats["std"]
 
   def _transform_category(self, category: str) -> np.ndarray:
     """Transform product category into one-hot encoding."""
@@ -42,14 +49,8 @@ class PreprocessPipeline:
       category_vec[-1] = 1
     return category_vec
 
-  def _transform_review_text(
-    self,
-    review_text: Union[str, List[str]],
-  ):
+  def _transform_review_text(self, text: str):
     """Clean up product review text from emojies and HTML tags"""
-    input_is_string = isinstance(review_text, str)
-    texts_to_clean = [review_text] if input_is_string else review_text
-
     emoji_pattern = re.compile(
       "[\U0001F600-\U0001F64F"  # emoticons
       "\U0001F300-\U0001F5FF"  # symbols & pictographs
@@ -66,8 +67,7 @@ class PreprocessPipeline:
     )
 
     # Remove all of the HTML tags from the strings
-    cleaned_texts = [re.sub(r"<[^>]+>", "", emoji_pattern.sub(r'', text)) for text in texts_to_clean]
-    return cleaned_texts[0] if input_is_string else cleaned_texts
+    return re.sub(r"<[^>]+>", "", emoji_pattern.sub(r'', text))
 
   def _transform_discount(self, discount: float) -> np.ndarray:
     """Transform discount rate into binned one-hot encoding."""
@@ -80,25 +80,28 @@ class PreprocessPipeline:
       discount_vec[-1] = 1
     return discount_vec
 
+  def _get_review_embeddings(
+    self, review_text: Union[str, List[str]], pbar: bool = False
+  ) -> np.ndarray:
+    return self.embedding_model.encode(
+      review_text, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=pbar
+    )
+
   def transform(
     self,
     row: Union[pd.Series, dict],
-  ) -> Tuple[torch.Tensor, torch.Tensor]:
+  ) -> np.ndarray:
     """Transform a single row of data."""
 
     # Feature transformations
     log_price = self._transform_price(row["price"])
     category_vec = self._transform_category(row["product_category"])
     discount_vec = self._transform_discount(float(row["discount_rate"]))
-    review_text = self._transform_review_text(str(row["review_text"]))
-    rating = float(row["rating"])
-    features = torch.cat([
-      torch.from_numpy(discount_vec).to(self.device),
-      torch.from_numpy(category_vec).to(self.device),
-      torch.Tensor([log_price]).to(self.device), review_text
-    ], dim=0)
-    rating = torch.Tensor([rating])
-    return features, rating
+    review_embeddings = self._get_review_embeddings(
+      self._transform_review_text(str(row["review_text"]))
+    )
+    features = np.concatenate([discount_vec, category_vec, log_price, review_embeddings], axis=1)
+    return features
 
   def process_dataset(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     # 1. Price preprocessing
@@ -118,9 +121,17 @@ class PreprocessPipeline:
       lambda x: x if x in self.config.top_categories else "Other"
     )
     category_one_hot = pd.get_dummies(df["category_grouped"], prefix="category", dtype=np.float32)
-    df["review_text"] = self._transform_review_text(df["review_text"].tolist())
+    review_embeddings = self._get_review_embeddings(
+      [self._transform_review_text(text) for text in df["review_text"].tolist()], True
+    )
+    review_embeddings = pd.DataFrame(
+      review_embeddings,
+      columns=(f"review_emb_{i}" for i in range(review_embeddings.shape[1])),
+      index=df.index
+    )
+
     features = pd.concat([
-      discount_one_hot, category_one_hot, df[["log_price"]], df[["review_text"]]
+      discount_one_hot, category_one_hot, df[["log_price"]], review_embeddings
     ], axis=1)
 
     y = df["rating"]
@@ -137,20 +148,24 @@ class PreprocessPipeline:
     print("  - Training Data Statistics:")
     print_feature_stats(train_df, "binary")
     print_feature_stats(train_df, "numeric")
+    print_feature_stats(train_df, "embedding")
 
     print("  - Test Data Statistics:")
     print_feature_stats(test_df, "binary")
     print_feature_stats(test_df, "numeric")
+    print_feature_stats(test_df, "embedding")
     return train_df, test_df
 
 
-def print_feature_stats(X, feature_type):
+def print_feature_stats(X: pd.DataFrame, feature_type: str):
   if feature_type == "binary":
     cols = [col for col in X.columns if col.startswith(("discount_", "category_"))]
   elif feature_type == "numeric":
     cols = ["log_price"]
+  elif feature_type == "embedding":
+    cols = [col for col in X.columns if col.startswith("review_emb_")]
   else:
-    raise ValueError
+    raise NotImplementedError(feature_type)
 
   subset = X[cols]
   print(f"\t- {feature_type.capitalize()} Features Statistics:")
