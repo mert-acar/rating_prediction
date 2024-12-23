@@ -1,9 +1,10 @@
 import os
 import yaml
 import joblib
-from pprint import pprint
+from tabulate import tabulate
 from datetime import datetime
 from typing import Dict, Optional
+from collections import defaultdict
 from sklearn.pipeline import Pipeline
 
 
@@ -31,16 +32,23 @@ class ModelRegistry:
     model_version: str,
     description: str,
     metrics: Optional[Dict[str, float]] = None
-  ) -> None:
+  ):
     joblib.dump(pipe, pipe_path)
     self.index['models'][model_version] = {
       'timestamp': datetime.now().isoformat(),
-      'description': description, 
+      'description': description,
       'metrics': metrics or {},
       'pipe_path': pipe_path
     }
     self._save_index()
     print(f"+ Model is registered and saved to {pipe_path}")
+
+  def delete_model(self, version: str):
+    model = self.index["models"].get(version, None)
+    if model is None:
+      raise ValueError(f"Model with version {version} does not exists!")
+    os.remove(model["pipe_path"])
+    del self.index["models"][version]
 
   def load_model(self, version: str) -> Pipeline:
     if version not in self.index['models']:
@@ -53,15 +61,27 @@ class ModelRegistry:
     """Get the latest model version based on timestamp."""
     if not self.index['models']:
       raise ValueError("No models registered")
-    return max(
-      self.index['models'].keys(), key=lambda v: self.index['models'][v]['timestamp']
-    )
+    return max(self.index['models'].keys(), key=lambda v: self.index['models'][v]['timestamp'])
 
-  def list_versions(self):
-    if len(self.index["models"]) == 0:
+  def list_versions(self, tobeprinted: bool = False) -> Optional[dict]:
+    if len(self.index["models"]) == 0 and tobeprinted:
       print("No model in the registry yet! Train a model using the train script to register.")
-      return
-    pprint([{"version": version, **info} for version, info in self.index['models'].items()])
+
+    versiondict = defaultdict(list)
+    for version, info in self.index["models"].items():
+      versiondict["version"].append(version)
+      for key, val in info.items():
+        if key == "metrics":
+          for m, s in val.items():
+            versiondict[m].append(s)
+        else:
+          versiondict[key].append(val)
+
+    if not tobeprinted:
+      return versiondict
+
+    print("\n" + tabulate(versiondict, headers=list(versiondict.keys())) + "\n")
+
 
 if __name__ == "__main__":
-  ModelRegistry().list_versions()
+  ModelRegistry().list_versions(True)

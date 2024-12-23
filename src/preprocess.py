@@ -2,6 +2,7 @@ import re
 import numpy as np
 import pandas as pd
 from typing import Tuple
+from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sentence_transformers import SentenceTransformer
@@ -11,7 +12,6 @@ from sklearn.utils.validation import check_is_fitted
 
 # TODO:
 # + Dont normalize the embeddings
-# + PCA on the embeddings
 
 
 class TextCleaner(BaseEstimator, TransformerMixin):
@@ -42,15 +42,41 @@ class TextCleaner(BaseEstimator, TransformerMixin):
     return np.array([self.clean_text(text) for text in X])
 
 
+class DeNoiser(BaseEstimator, TransformerMixin):
+  def __init__(self, threshold: float = 0.95):
+    self.pca = None
+    self.threshold = threshold
+    self.is_fitted_ = False
+
+  def fit(self, X, y=None):
+    try:
+      if self.pca is None:
+        self.pca = PCA(n_components=self.threshold)
+        self.pca.fit(X)
+        self.is_fitted_ = True
+    except Exception as e:
+      print(f"Error fitting PCA: {str(e)}")
+      raise
+    return self
+
+  def transform(self, X: np.ndarray) -> np.ndarray:
+    """Transform texts into vector embeddings using the LLM"""
+    if self.pca is None:
+      raise ValueError("PCA not initialized. Call fit() first.")
+    return self.pca.transform(X)
+
+
 class LLMEncoder(BaseEstimator, TransformerMixin):
   def __init__(self, encoding_model_name: str = "all-MiniLM-L6-v2"):
     self.encoding_model_name = encoding_model_name
     self.encoding_model = None
+    self.is_fitted_ = False
 
   def fit(self, X, y=None):
     try:
       if self.encoding_model is None:
         self.encoding_model = SentenceTransformer(self.encoding_model_name)
+        self.is_fitted_ = True
     except Exception as e:
       print(f"Error loading model: {str(e)}")
       raise
@@ -62,7 +88,7 @@ class LLMEncoder(BaseEstimator, TransformerMixin):
       raise ValueError("Model not initialized. Call fit() first.")
 
     return self.encoding_model.encode(
-      X, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False
+      X, convert_to_numpy=True, normalize_embeddings=False, show_progress_bar=False
     )
 
 
@@ -111,6 +137,7 @@ def get_text_pipeline(encoding_model_name: str) -> Pipeline:
   return Pipeline([
     ("cleaner", TextCleaner()),
     ("encoder", LLMEncoder(encoding_model_name=encoding_model_name)),
+    # ("denoiser", DeNoiser()),
   ])
 
 
@@ -152,7 +179,8 @@ if __name__ == "__main__":
   discount_bins = (0.0, 0.2, 0.6, 1.0)
   top_categories = ['Sports & Outdoors', 'Health & Personal Care', 'AMAZON FASHION']
   encoding_model_name = "all-MiniLM-L6-v2"
-  output_dir = "../data/allMiniLM/"
+  output_dir = "../data/allMiniLM_NN/"
+  os.makedirs(output_dir, exist_ok=True)
 
   df = pd.read_csv("../data/product_user_reviews.csv")
   X, y = df.drop("rating", axis=1), df[["rating"]]
@@ -161,16 +189,17 @@ if __name__ == "__main__":
   )
 
   preprocessor = get_preprocess_pipeline(discount_bins, top_categories, encoding_model_name)
-  processed_X_train = preprocessor.fit_transform(X_train, y_train)
-  processed_X_test = preprocessor.transform(X_test)
 
-  os.makedirs(output_dir, exist_ok=True)
+  print("+ Processing training data...")
+  processed_X_train = preprocessor.fit_transform(X_train, y_train)
   with open(os.path.join(output_dir, "train_features.npy"), "wb") as f:
     np.save(f, processed_X_train)
 
   with open(os.path.join(output_dir, "train_ratings.npy"), "wb") as f:
     np.save(f, y_train.to_numpy())
 
+  print("+ Processing testing data...")
+  processed_X_test = preprocessor.transform(X_test)
   with open(os.path.join(output_dir, "test_features.npy"), "wb") as f:
     np.save(f, processed_X_test)
 
@@ -178,3 +207,4 @@ if __name__ == "__main__":
     np.save(f, y_test.to_numpy())
 
   joblib.dump(preprocessor, os.path.join(output_dir, "preprocessor.joblib"))
+  print(f"Processed datasets and fitted preprocessor saved in {output_dir}")

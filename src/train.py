@@ -21,9 +21,7 @@ def load_data(data_dir: str) -> Tuple[np.ndarray, ...]:
   return train_feat, train_ratings, test_feat, test_ratings
 
 
-if __name__ == "__main__":
-  data_dir = "../data/allMiniLM/"
-
+def main(data_dir: str = "../data/allMiniLM/"):
   train_feat, train_ratings, test_feat, test_ratings = load_data(data_dir)
 
   n_samples = len(train_ratings)
@@ -34,7 +32,7 @@ if __name__ == "__main__":
   sample_weights = class_weights[train_ratings - 1]
 
   model = Ridge(random_state=9001)
-  params = {"alpha": [0, 0.2, 0.5, 0.8, 1.0, 1.5, 2]}
+  params = {"alpha": [0, 0.2, 0.5, 0.8, 1.0]}
   grid_search = GridSearchCV(model, params, cv=5, scoring='neg_mean_squared_error', n_jobs=-1)
   grid_search.fit(train_feat, train_ratings)
   print(f"Best parameters:")
@@ -46,7 +44,7 @@ if __name__ == "__main__":
 
   mse = mean_squared_error(test_ratings, y_pred)
   print(f"+ MSE: {mse:.4f}")
-  rmse = float(np.sqrt(mse))
+  rmse = np.sqrt(mse)
   print(f"+ RMSE: {rmse:.4f}")
 
   mae = mean_absolute_error(test_ratings, y_pred)
@@ -56,30 +54,40 @@ if __name__ == "__main__":
   print(f"+ R2 Score: {r2:.4f}")
 
   ans = input("Save model to the registry? [Y/n]: ")
-  if ans.lower() == "y":
-    registry = ModelRegistry()
-    preprocessor = joblib.load(os.path.join(data_dir, "preprocessor.joblib"))
-    pipe = Pipeline([
-      ("preprocess", preprocessor),
-      ("prediction", model),
-    ])
+  if ans.lower() != "y":
+    return
 
-    version = ""
-    while len(version) == 0:
-      version = input("Model version (v[<desired_version_str>]: ")
-    version = re.sub(r"^(v\.?|V\.?)", "", version)
+  registry = ModelRegistry()
 
-    description = input("Short model description: ")
+  print("Current Registry:")
+  print(registry.list_versions())
+  preprocessor = joblib.load(os.path.join(data_dir, "preprocessor.joblib"))
+  pipe = Pipeline([
+    ("preprocess", preprocessor),
+    ("prediction", grid_search.best_estimator_),
+  ])
 
-    registry.register_model(
-      pipe,
-      f"../models/model_v{version}",
-      version,
-      description,
-      {
-        "MSE": np.round(mse, 3),
-        "RMSE": np.round(rmse, 3),
-        "MAE": np.round(mae, 3),
-        "R2": np.round(r2, 3)
-      },
-    )
+  version = ""
+  while len(version) == 0:
+    version = input("Model version (v[<desired_version_str>]: ")
+  version = re.sub(r"^(v\.?|V\.?)", "", version)
+
+  description = input("Short model description: ")
+
+  registry.register_model(
+    pipe,
+    f"../models/model_v{version}",
+    version,
+    description,
+    {
+      "MSE": float(np.round(mse, 3)),
+      "RMSE": float(np.round(rmse, 3)),
+      "MAE": float(np.round(mae, 3)),
+      "R2": float(np.round(r2, 3))
+    },
+  )
+
+
+if __name__ == "__main__":
+  from fire import Fire
+  Fire(main)
