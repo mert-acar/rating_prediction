@@ -62,7 +62,7 @@ class LLMEncoder(BaseEstimator, TransformerMixin):
       raise ValueError("Model not initialized. Call fit() first.")
 
     return self.encoding_model.encode(
-      X, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=True
+      X, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False
     )
 
 
