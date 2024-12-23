@@ -1,24 +1,15 @@
+import re
 import os
 import joblib
-import xgboost
 import numpy as np
 from typing import Tuple
-from sklearn.linear_model import HuberRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import Ridge
 from sklearn.model_selection import GridSearchCV
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-
-def evaluate_model(y_true, y_pred, model_name):
-  mse = mean_squared_error(y_true, y_pred)
-  mae = mean_absolute_error(y_true, y_pred)
-  r2 = r2_score(y_true, y_pred)
-
-  print(f"\n{model_name} Results:")
-  print(f"MSE: {mse:.4f}")
-  print(f"RMSE: {np.sqrt(mse):.4f}")
-  print(f"MAE: {mae:.4f}")
-  print(f"R2 Score: {r2:.4f}")
+from model_registry import ModelRegistry
+from preprocess import *
 
 
 def load_data(data_dir: str) -> Tuple[np.ndarray, ...]:
@@ -42,71 +33,53 @@ if __name__ == "__main__":
   ])
   sample_weights = class_weights[train_ratings - 1]
 
-  rf_params = {
-    'n_estimators': [100, 200, 300],
-    'max_depth': [5, 10, 15, 20],
-    'min_samples_split': [2, 5, 10],
-    'min_samples_leaf': [1, 2, 4]
-  }
+  model = Ridge(random_state=9001)
+  params = {"alpha": [0, 0.2, 0.5, 0.8, 1.0, 1.5, 2]}
+  grid_search = GridSearchCV(model, params, cv=5, scoring='neg_mean_squared_error', n_jobs=-1)
+  grid_search.fit(train_feat, train_ratings)
+  print(f"Best parameters:")
+  print(grid_search.best_params_)
 
-  gb_params = {
-    'n_estimators': [100, 200, 300],
-    'learning_rate': [0.01, 0.05, 0.1],
-    'max_depth': [3, 5, 7],
-    'subsample': [0.7, 0.8, 0.9]
-  }
+  y_pred = grid_search.predict(test_feat)
 
-  xgb_params = {
-    'n_estimators': [100, 200, 300],
-    'learning_rate': [0.01, 0.05, 0.1],
-    'max_depth': [3, 5, 7],
-    'subsample': [0.7, 0.8, 0.9],
-    'colsample_bytree': [0.7, 0.8, 0.9]
-  }
+  print(f"Results:")
 
-  huber_params = {
-    'epsilon': [1.1, 1.35, 1.5],
-    'alpha': [0.0001, 0.001, 0.01],
-    'max_iter': [100, 200, 300]
-  }
+  mse = mean_squared_error(test_ratings, y_pred)
+  print(f"+ MSE: {mse:.4f}")
+  rmse = float(np.sqrt(mse))
+  print(f"+ RMSE: {rmse:.4f}")
 
-  models = {
-    'Huber': (HuberRegressor(), huber_params),
-    'XGBoost': (xgboost.XGBRegressor(random_state=42), xgb_params),
-    'Gradient Boosting': (GradientBoostingRegressor(random_state=42), gb_params),
-    'Random Forest': (RandomForestRegressor(random_state=42), rf_params),
-  }
+  mae = mean_absolute_error(test_ratings, y_pred)
+  print(f"+ MAE: {mae:.4f}")
 
-  best_score = float('inf')
-  best_model_name = None
-  best_model = None
+  r2 = r2_score(test_ratings, y_pred)
+  print(f"+ R2 Score: {r2:.4f}")
 
-  for name, (model, params) in models.items():
-    print(f"\nTuning {name}...")
-    grid_search = GridSearchCV(
-      model, params, cv=5, scoring='neg_mean_squared_error', n_jobs=-1, verbose=2
+  ans = input("Save model to the registry? [Y/n]: ")
+  if ans.lower() == "y":
+    registry = ModelRegistry()
+    preprocessor = joblib.load(os.path.join(data_dir, "preprocessor.joblib"))
+    pipe = Pipeline([
+      ("preprocess", preprocessor),
+      ("prediction", model),
+    ])
+
+    version = ""
+    while len(version) == 0:
+      version = input("Model version (v[<desired_version_str>]: ")
+    version = re.sub(r"^(v\.?|V\.?)", "", version)
+
+    description = input("Short model description: ")
+
+    registry.register_model(
+      pipe,
+      f"../models/model_v{version}",
+      version,
+      description,
+      {
+        "MSE": np.round(mse, 3),
+        "RMSE": np.round(rmse, 3),
+        "MAE": np.round(mae, 3),
+        "R2": np.round(r2, 3)
+      },
     )
-
-    if name in ['Random Forest', 'Gradient Boosting', 'XGBoost']:
-      grid_search.fit(train_feat, train_ratings, sample_weight=sample_weights)
-    else:
-      grid_search.fit(train_feat, train_ratings)
-
-    print(f"\nBest parameters for {name}:")
-    print(grid_search.best_params_)
-
-    y_pred = grid_search.predict(test_feat)
-    evaluate_model(test_ratings, y_pred, name)
-
-    current_score = mean_squared_error(test_ratings, y_pred)
-    if current_score < best_score:
-      best_score = current_score
-      best_model_name = name
-      best_model = grid_search.best_estimator_
-
-  print(f"\nBest performing model: {best_model_name}")
-  print(f"Best RMSE: {np.sqrt(best_score):.4f}")
-
-  os.makedirs(data_dir, exist_ok=True)
-  joblib.dump(best_model, os.path.join(data_dir, f"best_model_{best_model_name}.joblib"))
-  print(f"\nBest model saved as: best_model_{best_model_name}.joblib")
