@@ -25,6 +25,9 @@ class ModelRegistry:
     with open(self.index_path, "w") as f:
       yaml.dump(self.index, f)
 
+  def __len__(self) -> int:
+    return len(self.index)
+
   def register_model(
     self,
     pipe: Pipeline,

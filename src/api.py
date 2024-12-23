@@ -36,7 +36,7 @@ async def predict(request: PredictionRequest) -> PredictionResponse:
       'discount_rate': [request.discount_rate],
       'product_category': [request.product_category]
     })
-    prediction = np.round(pipeline.predict(input_data)[0])
+    prediction = np.clip(np.round(pipeline.predict(input_data)[0]), 1, 10)
     return PredictionResponse(predicted_rating=float(prediction))
   except ValueError as e:
     raise HTTPException(status_code=400, detail=str(e))
