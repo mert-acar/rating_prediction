@@ -1,146 +1,117 @@
 import os
-import torch
-import pandas as pd
+import joblib
+import xgboost
 import numpy as np
-from tqdm import tqdm
-from time import time
-from yaml import full_load
-import matplotlib.pyplot as plt
-from shutil import copyfile, rmtree
+from typing import Tuple
+from sklearn.linear_model import HuberRegressor
+from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-from model import RatingPredictor
+
+def evaluate_model(y_true, y_pred, model_name):
+    mse = mean_squared_error(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
+
+    print(f"\n{model_name} Results:")
+    print(f"MSE: {mse:.4f}")
+    print(f"RMSE: {np.sqrt(mse):.4f}")
+    print(f"MAE: {mae:.4f}")
+    print(f"R2 Score: {r2:.4f}")
+
+
+def load_data(data_dir: str) -> Tuple[np.ndarray, ...]:
+    print("Loading data...")
+    train_feat = np.load(os.path.join(data_dir, "train_features.npy"))
+    train_ratings = np.load(os.path.join(data_dir, "train_ratings.npy")).flatten()
+    test_feat = np.load(os.path.join(data_dir, "test_features.npy"))
+    test_ratings = np.load(os.path.join(data_dir, "test_ratings.npy")).flatten()
+    return train_feat, train_ratings, test_feat, test_ratings
+
 
 if __name__ == "__main__":
-  with open("./config.yaml", "r") as f:
-    config = full_load(f)
-  train_config = config["training"]
+    data_dir = "../data/allMiniLM/"
 
-  # Create the checkpoint output path
-  if os.path.exists(train_config["output_path"]):
-    c = input(
-      f"Output path {train_config['output_path']} is not empty! Do you want to delete the folder [y / n]: "
-    )
-    if "y" == c.lower():
-      rmtree(train_config["output_path"], ignore_errors=True)
-    else:
-      print("Exit!")
-      raise SystemExit
+    train_feat, train_ratings, test_feat, test_ratings = load_data(data_dir)
 
-  os.makedirs(train_config["output_path"])
-  copyfile("./config.yaml", os.path.join(train_config["output_path"], "ExperimentSummary.yaml"))
+    n_samples = len(train_ratings)
+    ratings = np.unique(train_ratings)
+    class_weights = np.array([
+        n_samples / (len(ratings) * (train_ratings == rating).sum()) for rating in ratings
+    ])
+    sample_weights = class_weights[train_ratings - 1]
 
-  device = torch.device(train_config["device"])
-  print(f"[INFO] Running on {device}")
+    rf_params = {
+        'n_estimators': [100, 200, 300],
+        'max_depth': [5, 10, 15, 20],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
 
-  datasets = {
-    "train": pd.read_csv(os.path.join(train_config["data_path"], "train_df.csv")),
-    "test": pd.read_csv(os.path.join(train_config["data_path"], "test_df.csv")),
-  }
+    gb_params = {
+        'n_estimators': [100, 200, 300],
+        'learning_rate': [0.01, 0.05, 0.1],
+        'max_depth': [3, 5, 7],
+        'subsample': [0.7, 0.8, 0.9]
+    }
 
-  rating_counts = list(datasets['train']['rating'].value_counts().sort_index())
-  total_samples = len(datasets['train'])
-  weights = torch.FloatTensor([total_samples/(10 * rating_counts[i]) for i in range(10)]).to(device)
+    xgb_params = {
+        'n_estimators': [100, 200, 300],
+        'learning_rate': [0.01, 0.05, 0.1],
+        'max_depth': [3, 5, 7],
+        'subsample': [0.7, 0.8, 0.9],
+        'colsample_bytree': [0.7, 0.8, 0.9]
+    }
 
-  model = RatingPredictor(**config["model"]).to(device)
-  model.freeze_embedding_model(-2)
+    huber_params = {
+        'epsilon': [1.1, 1.35, 1.5],
+        'alpha': [0.0001, 0.001, 0.01],
+        'max_iter': [100, 200, 300]
+    }
 
-  criterion = torch.nn.HuberLoss(delta=1.0, reduction='none')
-  optimizer = torch.optim.AdamW(model.parameters(), **train_config["optimizer_args"])
-  scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, **train_config["scheduler_args"]
-  )
+    models = {
+      'Huber': (HuberRegressor(), huber_params),
+      'XGBoost': (xgboost.XGBRegressor(random_state=42), xgb_params),
+      'Gradient Boosting': (GradientBoostingRegressor(random_state=42), gb_params),
+      'Random Forest': (RandomForestRegressor(random_state=42), rf_params),
+    }
 
-  tick = time()
-  best_epoch = -1
-  best_error = 999999
-  phases = ["train", "test"]
-  metrics = ["Loss", "RMSE", "MAE"]
-  metrics = {metric: {phase: [] for phase in phases} for metric in metrics}
+    best_score = float('inf')
+    best_model_name = None
+    best_model = None
 
-  for epoch in range(1, train_config["num_epochs"] + 1):
-    print("-" * 20)
-    print(f"Epoch {epoch} / {train_config['num_epochs']}")
-    for phase in phases:
-      dataset = datasets[phase]
-      if phase == "train":
-        model.train()
-        dataset = dataset.sample(frac=1).reset_index(drop=True)
-      else:
-        model.eval()
+    for name, (model, params) in models.items():
+        print(f"\nTuning {name}...")
+        grid_search = GridSearchCV(
+            model,
+            params,
+            cv=5,
+            scoring='neg_mean_squared_error',
+            n_jobs=-1,
+            verbose=2
+        )
+        
+        if name in ['Random Forest', 'Gradient Boosting', 'XGBoost']:
+            grid_search.fit(train_feat, train_ratings, sample_weight=sample_weights)
+        else:
+            grid_search.fit(train_feat, train_ratings)
 
-      running_error = 0
-      running_mae = 0
-      running_rmse = 0
-      pbar = tqdm(range(0, len(dataset), train_config["batch_size"]), ncols=94)
-      with torch.set_grad_enabled(phase == "train"):
-        for i in pbar:
-          batch = dataset.iloc[i:i + train_config["batch_size"]]
-          reviews = batch["review_text"].tolist()
-          features = torch.from_numpy(batch.drop(["review_text", "rating"], axis=1).to_numpy()).float().to(device)
-          y = torch.from_numpy(batch["rating"].to_numpy()).long().to(device)
+        print(f"\nBest parameters for {name}:")
+        print(grid_search.best_params_)
+        
+        y_pred = grid_search.predict(test_feat)
+        evaluate_model(test_ratings, y_pred, name)
+        
+        current_score = mean_squared_error(test_ratings, y_pred)
+        if current_score < best_score:
+            best_score = current_score
+            best_model_name = name
+            best_model = grid_search.best_estimator_
 
-          optimizer.zero_grad()
-          out = model(reviews, features)
-          out = out.squeeze()
+    print(f"\nBest performing model: {best_model_name}")
+    print(f"Best RMSE: {np.sqrt(best_score):.4f}")
 
-          # Weighted loss
-          loss = criterion(out, (y - 1) / 9)
-          sample_weights = weights[y - 1]
-          loss = (loss * sample_weights).mean()
-
-          if phase == "train":
-            loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-          # Calculate metrics
-          out = out * 9 + 1
-          mae = torch.abs(out - y).mean()
-          rmse = torch.sqrt(((out - y)**2).mean())
-          running_error += loss.item()
-          running_mae += mae.item()
-          running_rmse += rmse.item()
-          pbar.set_description(f"Loss: {loss.item():.3f} | MAE: {mae:.2f}")
-
-      num_batches = len(pbar)
-      running_error /= num_batches
-      running_mae /= num_batches
-      running_rmse /= num_batches
-      print(f"Loss: {running_error:.5f} | MAE: {running_mae:.3f} | RMSE: {running_rmse:.3f}")
-      metrics["Loss"][phase].append(running_error)
-      metrics["MAE"][phase].append(running_mae)
-      metrics["RMSE"][phase].append(running_rmse)
-
-      if phase == "test":
-        scheduler.step(running_error)
-        if running_error < best_error:
-          best_error = running_error
-          best_epoch = epoch
-          ckpt_path = os.path.join(train_config["output_path"], "checkpoint.pt")
-          print(f"+ Saving the model to {ckpt_path}...")
-          torch.save(model.state_dict(), ckpt_path)
-
-    # If no validation improvement has been recorded for "early_stop" number of epochs
-    # stop the training.
-    if epoch - best_epoch >= train_config["early_stop_patience"]:
-      print(f"No improvements in {train_config['early_stop_patience']} epochs, stop!")
-      break
-
-  total_time = time() - tick
-  m, s = divmod(total_time, 60)
-  h, m = divmod(m, 60)
-  print(f"Training took {int(h):d} hours {int(m):d} minutes {s:.2f} seconds.")
-
-  fig, axs = plt.subplots(1, len(metrics), tight_layout=True, figsize=(15, 5))
-  epochs = list(range(1, epoch + 1))
-  for i, (metric, arr) in enumerate(metrics.items()):
-    for phase, val in arr.items():
-      axs[i].plot(epochs, val, label=phase)
-    axs[i].set_xlabel("Epochs")
-    axs[i].set_ylabel(metric)
-    axs[i].legend()
-    axs[i].grid(True)
-  fig.suptitle("Model Performance Across Epochs")
-  plt.savefig(
-    os.path.join(train_config["output_path"], "performance_curves.png"), bbox_inches="tight"
-  )
+    os.makedirs(data_dir, exist_ok=True)
+    joblib.dump(best_model, os.path.join(data_dir, f"best_model_{best_model_name}.joblib"))
+    print(f"\nBest model saved as: best_model_{best_model_name}.joblib")
