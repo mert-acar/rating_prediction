@@ -1,55 +1,21 @@
-import os
 import re
-import torch
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
-from sklearn.model_selection import train_test_split
-from typing import Tuple, Union, Optional, List, Dict
+from typing import Tuple
+from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sentence_transformers import SentenceTransformer
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, OneHotEncoder
 
 
-@dataclass(frozen=True)
-class DatasetConfig:
-  """Configuration for dataset preprocessing."""
-  test_size: float
-  random_state: int
-  discount_bins: List[float]
-  top_categories: List[str]
-  price_stats: Dict[str, float]
+class TextCleaner(BaseEstimator, TransformerMixin):
+  def fit(self, X, y=None):
+    return self
 
-
-class PreprocessPipeline:
-  """Handles feature transformation for both training and inference."""
-  def __init__(self, config: Optional[DatasetConfig] = None, device: Optional[str] = None):
-    self.config = config or DatasetConfig()
-    self.device = device or torch.device("cuda" if torch.cuda.is_available() else "mps")
-
-  def _transform_price(self, price: float) -> float:
-    """Transform price using log transformation and standardization."""
-    log_price = (np.log1p(price) - self.config.price_stats["mean"]) / self.config.price_stats["std"]
-    return log_price.astype(np.float32)
-
-  def _transform_category(self, category: str) -> np.ndarray:
-    """Transform product category into one-hot encoding."""
-    category = category.split("|")[0].lower().strip()
-    category_vec = np.zeros(
-      len(self.config.top_categories) + 1,  # +1 for OTHER
-      dtype=np.float32
-    )
-    if category in self.config.top_categories:
-      category_vec[self.config.top_categories.index(category)] = 1
-    else:
-      category_vec[-1] = 1
-    return category_vec
-
-  def _transform_review_text(
-    self,
-    review_text: Union[str, List[str]],
-  ):
-    """Clean up product review text from emojies and HTML tags"""
-    input_is_string = isinstance(review_text, str)
-    texts_to_clean = [review_text] if input_is_string else review_text
-
+  def clean_text(self, text: str) -> str:
+    """ Clean text from emojies and html tags """
     emoji_pattern = re.compile(
       "[\U0001F600-\U0001F64F"  # emoticons
       "\U0001F300-\U0001F5FF"  # symbols & pictographs
@@ -66,132 +32,180 @@ class PreprocessPipeline:
     )
 
     # Remove all of the HTML tags from the strings
-    cleaned_texts = [re.sub(r"<[^>]+>", "", emoji_pattern.sub(r'', text)) for text in texts_to_clean]
-    return cleaned_texts[0] if input_is_string else cleaned_texts
+    return re.sub(r"<[^>]+>", "", emoji_pattern.sub(r'', text))
 
-  def _transform_discount(self, discount: float) -> np.ndarray:
-    """Transform discount rate into binned one-hot encoding."""
-    discount_vec = np.zeros(len(self.config.discount_bins), dtype=np.float32)
-    for i in range(len(self.config.discount_bins) - 1):
-      if self.config.discount_bins[i] <= discount < self.config.discount_bins[i + 1]:
-        discount_vec[i] = 1
-        break
-    else:
-      discount_vec[-1] = 1
-    return discount_vec
+  def transform(self, X: np.ndarray) -> np.ndarray:
+    return np.array([self.clean_text(text) for text in X])
 
-  def transform(
-    self,
-    row: Union[pd.Series, dict],
-  ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Transform a single row of data."""
 
-    # Feature transformations
-    log_price = self._transform_price(row["price"])
-    category_vec = self._transform_category(row["product_category"])
-    discount_vec = self._transform_discount(float(row["discount_rate"]))
-    review_text = self._transform_review_text(str(row["review_text"]))
-    rating = float(row["rating"])
-    features = torch.cat([
-      torch.from_numpy(discount_vec).to(self.device),
-      torch.from_numpy(category_vec).to(self.device),
-      torch.Tensor([log_price]).to(self.device), review_text
-    ], dim=0)
-    rating = torch.Tensor([rating])
-    return features, rating
+class DeNoiser(BaseEstimator, TransformerMixin):
+  def __init__(self, threshold: float = 0.95):
+    self.pca = None
+    self.threshold = threshold
+    self.is_fitted_ = False
 
-  def process_dataset(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    # 1. Price preprocessing
-    df["log_price"] = self._transform_price(df["price"])
+  def fit(self, X, y=None):
+    try:
+      if self.pca is None:
+        self.pca = PCA(n_components=self.threshold)
+        self.pca.fit(X)
+        self.is_fitted_ = True
+    except Exception as e:
+      print(f"Error fitting PCA: {str(e)}")
+      raise
+    return self
 
-    # 2. Discount preprocessing
-    df["discount_bracket"] = pd.cut(
-      df["discount_rate"],
-      bins=[-float("inf")] + self.config.discount_bins,
-      labels=[f"{i}" for i in range(len(self.config.discount_bins))]
+  def transform(self, X: np.ndarray) -> np.ndarray:
+    """Transform texts into vector embeddings using the LLM"""
+    if self.pca is None:
+      raise ValueError("PCA not initialized. Call fit() first.")
+    return self.pca.transform(X)
+
+
+class LLMEncoder(BaseEstimator, TransformerMixin):
+  def __init__(self, encoding_model_name: str = "all-MiniLM-L6-v2"):
+    self.encoding_model_name = encoding_model_name
+    self.encoding_model = None
+    self.is_fitted_ = False
+
+  def fit(self, X, y=None):
+    try:
+      if self.encoding_model is None:
+        self.encoding_model = SentenceTransformer(self.encoding_model_name).to("cpu")
+        self.is_fitted_ = True
+    except Exception as e:
+      print(f"Error loading model: {str(e)}")
+      raise
+    return self
+
+  def transform(self, X: np.ndarray) -> np.ndarray:
+    """Transform texts into vector embeddings using the LLM"""
+    if self.encoding_model is None:
+      raise ValueError("Model not initialized. Call fit() first.")
+
+    return self.encoding_model.encode(
+      X, convert_to_numpy=True, normalize_embeddings=True, device="cpu"
     )
-    discount_one_hot = pd.get_dummies(df["discount_bracket"], prefix="discount", dtype=np.float32)
-
-    # 3. Category preprocessing
-    df["main_category"] = df["product_category"].str.split("|").str[0].str.strip()
-    df["category_grouped"] = df["main_category"].apply(
-      lambda x: x if x in self.config.top_categories else "Other"
-    )
-    category_one_hot = pd.get_dummies(df["category_grouped"], prefix="category", dtype=np.float32)
-    df["review_text"] = self._transform_review_text(df["review_text"].tolist())
-    features = pd.concat([
-      discount_one_hot, category_one_hot, df[["log_price"]], df[["review_text"]]
-    ], axis=1)
-
-    y = df["rating"]
-    X_train, X_test, y_train, y_test = train_test_split(
-      features,
-      y,
-      test_size=self.config.test_size,
-      stratify=y,
-      random_state=self.config.random_state
-    )
-    train_df = pd.concat([X_train, y_train], axis=1)
-    test_df = pd.concat([X_test, y_test], axis=1)
-
-    print("  - Training Data Statistics:")
-    print_feature_stats(train_df, "binary")
-    print_feature_stats(train_df, "numeric")
-
-    print("  - Test Data Statistics:")
-    print_feature_stats(test_df, "binary")
-    print_feature_stats(test_df, "numeric")
-    return train_df, test_df
 
 
-def print_feature_stats(X, feature_type):
-  if feature_type == "binary":
-    cols = [col for col in X.columns if col.startswith(("discount_", "category_"))]
-  elif feature_type == "numeric":
-    cols = ["log_price"]
-  else:
-    raise ValueError
+class CategoryMapper(BaseEstimator, TransformerMixin):
+  def __init__(self, top_categories: Tuple[str]):
+    self.top_categories = top_categories
 
-  subset = X[cols]
-  print(f"\t- {feature_type.capitalize()} Features Statistics:")
-  print(f"\t\tMean: {subset.values.mean():.4f}")
-  print(f"\t\tStd: {subset.values.std():.4f}")
-  print(f"\t\tMin: {subset.values.min():.4f}")
-  print(f"\t\tMax: {subset.values.max():.4f}")
+  def fit(self, X, y=None):
+    return self
+
+  def transform(self, X: np.ndarray) -> np.ndarray:
+    X = np.asarray(X).flatten()
+    mapped_categories = []
+    for val in X:
+      val = val.split("|")[0].strip()
+      if val in self.top_categories:
+        mapped_categories.append(val)
+      else:
+        mapped_categories.append("Other")
+    return np.array(mapped_categories).reshape(-1, 1)
 
 
-def prepare_train_test_split(
-  csv_path: str, output_dir: str = "../data/", config_path: str = "./config.yaml"
-):
-  """Prepare and save train/test splits."""
+class NumBinner(BaseEstimator, TransformerMixin):
+  def __init__(self, discount_bins: Tuple[float]):
+    self.discount_bins = discount_bins
+    self.bin_labels = [f"bin_{i}" for i in range(len(discount_bins) + 1)]
 
-  from yaml import full_load
-  with open(config_path, "r") as f:
-    config = DatasetConfig(**full_load(f)["dataset"])
+  def fit(self, X, y=None):
+    return self
 
-  pipeline = PreprocessPipeline(config)
-  df = pd.read_csv(csv_path)
-  train_df, test_df = pipeline.process_dataset(df)
+  def transform(self, X: np.ndarray) -> np.ndarray:
+    bins = [-np.inf] + list(self.discount_bins) + [np.inf]
+    return np.array(pd.cut(X, bins=bins, labels=self.bin_labels)).reshape(-1, 1)
 
-  os.makedirs(output_dir, exist_ok=True)
-  train_df.to_csv(os.path.join(output_dir, "train_df.csv"), index=False)
-  test_df.to_csv(os.path.join(output_dir, "test_df.csv"), index=False)
+
+class LogTransformer(BaseEstimator, TransformerMixin):
+  def fit(self, X, y=None):
+    return self
+
+  def transform(self, X: np.ndarray) -> np.ndarray:
+    X = np.asarray(X).reshape(-1, 1)
+    return np.log1p(X)
+
+
+def get_text_pipeline(encoding_model_name: str) -> Pipeline:
+  return Pipeline([
+    ("cleaner", TextCleaner()),
+    ("encoder", LLMEncoder(encoding_model_name=encoding_model_name)),
+    # ("denoiser", DeNoiser()),
+  ])
+
+
+def get_discount_pipeline(discount_bins: Tuple[float]) -> Pipeline:
+  return Pipeline([("binner", NumBinner(discount_bins)),
+                   ("one_hot_encoder", OneHotEncoder(drop="first", sparse_output=False))])
+
+
+def get_category_pipeline(top_categories: Tuple[str]) -> Pipeline:
+  return Pipeline([("groupper", CategoryMapper(top_categories)),
+                   ("one_hot_encoder", OneHotEncoder(drop="first", sparse_output=False))])
+
+
+def get_price_pipeline() -> Pipeline:
+  return Pipeline([("log_transformer", LogTransformer()), ("scaler", StandardScaler()),
+                   ("minmax", MinMaxScaler((-1, 1)))])
+
+
+def get_preprocess_pipeline(
+  discount_bins: Tuple[float], top_categories: Tuple[str], encoding_model_name: str
+) -> ColumnTransformer:
+  return ColumnTransformer(
+    transformers=[
+      ("text", get_text_pipeline(encoding_model_name), "review_text"),
+      ("category", get_category_pipeline(top_categories), "product_category"),
+      ("discount", get_discount_pipeline(discount_bins), "discount_rate"),
+      ("price", get_price_pipeline(), "price"),
+    ]
+  )
 
 
 if __name__ == "__main__":
-  from fire import Fire
-  Fire(prepare_train_test_split)
+  import os
+  import joblib
+  from sklearn.model_selection import train_test_split
 
-  # from transformers import AutoTokenizer
-  # tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-  # model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-  # max_seq_length = int(model.get_max_seq_length())
-  # print(f"Max sequence length for model: {max_seq_length}")
-  # reviews = pd.read_csv("../data/product_user_reviews.csv")["review_text"].tolist()
-  # lengths = [len(tokenizer.encode(re.sub(r"<[^>]+>", "", review))) for review in reviews]
-  # # 1858
-  # print(f"Max length: {max(lengths)}")
-  # # 54.3
-  # print(f"Mean length: {sum(lengths)/len(lengths)}")
-  # # 1.45%
-  # print(f"% exceeding {max_seq_length}: {sum(l > max_seq_length for l in lengths)/len(lengths)*100:.2f}%")
+  test_size = 0.2
+  random_state = 9001
+  discount_bins = (0.0, 0.2, 0.6, 1.0)
+  top_categories = ['Sports & Outdoors', 'Health & Personal Care', 'AMAZON FASHION']
+  encoding_model_name = "all-mpnet-base-v2"
+  data_dir = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "../data/")
+  )
+  output_dir = "allMpnetBasev2"
+
+  output_dir = os.path.join(data_dir, output_dir)
+  os.makedirs(output_dir, exist_ok=True)
+
+  df = pd.read_csv(os.path.join(data_dir, "product_user_reviews.csv"))
+  X, y = df.drop("rating", axis=1), df[["rating"]]
+  X_train, X_test, y_train, y_test = train_test_split(
+    X, y, stratify=y, test_size=test_size, random_state=random_state
+  )
+
+  preprocessor = get_preprocess_pipeline(discount_bins, top_categories, encoding_model_name)
+
+  print("+ Processing training data...")
+  processed_X_train = preprocessor.fit_transform(X_train, y_train)
+  with open(os.path.join(output_dir, "train_features.npy"), "wb") as f:
+    np.save(f, processed_X_train)
+
+  with open(os.path.join(output_dir, "train_ratings.npy"), "wb") as f:
+    np.save(f, y_train.to_numpy())
+
+  print("+ Processing testing data...")
+  processed_X_test = preprocessor.transform(X_test)
+  with open(os.path.join(output_dir, "test_features.npy"), "wb") as f:
+    np.save(f, processed_X_test)
+
+  with open(os.path.join(output_dir, "test_ratings.npy"), "wb") as f:
+    np.save(f, y_test.to_numpy())
+
+  joblib.dump(preprocessor, os.path.join(output_dir, "preprocessor.joblib"))
+  print(f"Processed datasets and fitted preprocessor saved in {output_dir}")

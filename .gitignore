@@ -1,5 +1,6 @@
 data/
 logs/
+models/
 src/__pycache__/
 pyproject.toml
 src/bench.py

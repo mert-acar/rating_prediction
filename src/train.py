@@ -1,146 +1,121 @@
+import re
 import os
-import torch
-import pandas as pd
+import joblib
 import numpy as np
-from tqdm import tqdm
-from time import time
-from yaml import full_load
-import matplotlib.pyplot as plt
-from shutil import copyfile, rmtree
+from typing import Tuple
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-from model import RatingPredictor
+from model_registry import ModelRegistry
+from preprocess import *
+
+
+def load_data(data_dir: str) -> Tuple[np.ndarray, ...]:
+  print("Loading data...")
+  train_feat = np.load(os.path.join(data_dir, "train_features.npy"))
+  train_ratings = np.load(os.path.join(data_dir, "train_ratings.npy")).flatten()
+  test_feat = np.load(os.path.join(data_dir, "test_features.npy"))
+  test_ratings = np.load(os.path.join(data_dir, "test_ratings.npy")).flatten()
+  return train_feat, train_ratings, test_feat, test_ratings
+
+
+def compute_sample_weights(ratings: np.ndarray) -> np.ndarray:
+  """Compute sample weights to handle rating imbalance"""
+  n_samples = len(ratings)
+  unique_ratings = np.unique(ratings)
+  class_weights = np.array([
+    n_samples / (len(unique_ratings) * (ratings == rating).sum()) for rating in unique_ratings
+  ])
+  return class_weights[ratings.astype(int) - 1]
+
+
+def main(data_dir: str):
+  train_feat, train_ratings, test_feat, test_ratings = load_data(data_dir)
+  # sample_weights = compute_sample_weights(train_ratings)
+
+  random_state = 9001
+  from sklearn.linear_model import Ridge
+  model = Ridge(random_state=random_state)
+  params = {"alpha": [0, 1e-4, 1e-3, 1e-2, 0.5, 1]}
+
+
+  grid_search = GridSearchCV(
+    model,
+    params,
+    cv=5,
+    scoring='neg_mean_squared_error',
+    n_jobs=-1,
+  )
+
+  print("Training model...")
+  grid_search.fit(train_feat, train_ratings)
+  print(f"Best parameters:")
+  print(grid_search.best_params_)
+
+  y_pred = grid_search.predict(test_feat)
+  y_pred = np.clip(y_pred, 1, 10)
+
+  print(f"\nResults:")
+  mse = mean_squared_error(test_ratings, y_pred)
+  print(f"+ MSE: {mse:.4f}")
+  rmse = np.sqrt(mse)
+  print(f"+ RMSE: {rmse:.4f}")
+  mae = mean_absolute_error(test_ratings, y_pred)
+  print(f"+ MAE: {mae:.4f}")
+  r2 = r2_score(test_ratings, y_pred)
+  print(f"+ R2 Score: {r2:.4f}")
+
+  # Detailed error analysis by rating
+  print("\nError analysis by rating:")
+  for rating in sorted(np.unique(test_ratings)):
+    mask = test_ratings == rating
+    rating_mse = mean_squared_error(test_ratings[mask], y_pred[mask])
+    rating_mae = mean_absolute_error(test_ratings[mask], y_pred[mask])
+    print(f"Rating {rating}:")
+    print(f"  - Count: {mask.sum()}")
+    print(f"  - MSE: {rating_mse:.4f}")
+    print(f"  - MAE: {rating_mae:.4f}")
+
+  registry = ModelRegistry()
+  if len(registry) > 0:
+    print("\nCurrent Registry:")
+    registry.print_versions()
+
+  ans = input("\nSave model to the registry? [Y/n]: ")
+  if ans.lower() != "y":
+    return
+
+  preprocessor = joblib.load(os.path.join(data_dir, "preprocessor.joblib"))
+  pipe = Pipeline([
+    ("preprocess", preprocessor),
+    ("prediction", grid_search.best_estimator_),
+  ])
+
+  version = ""
+  while len(version) == 0:
+    version = input("Model version (v[<desired_version_str>]: ")
+  version = re.sub(r"^(v\.?|V\.?)", "", version)
+
+  description = input("Short model description: ")
+
+  registry.register_model(
+    pipe,
+    f"model_v{version}",
+    version,
+    description,
+    {
+      "MSE": float(np.round(mse, 3)),
+      "RMSE": float(np.round(rmse, 3)),
+      "MAE": float(np.round(mae, 3)),
+      "R2": float(np.round(r2, 3))
+    },
+  )
+  print(f"+ Model is registered and saved to {pipe}")
+  print("\nCurrent Registry:")
+  registry.print_versions()
+
 
 if __name__ == "__main__":
-  with open("./config.yaml", "r") as f:
-    config = full_load(f)
-  train_config = config["training"]
-
-  # Create the checkpoint output path
-  if os.path.exists(train_config["output_path"]):
-    c = input(
-      f"Output path {train_config['output_path']} is not empty! Do you want to delete the folder [y / n]: "
-    )
-    if "y" == c.lower():
-      rmtree(train_config["output_path"], ignore_errors=True)
-    else:
-      print("Exit!")
-      raise SystemExit
-
-  os.makedirs(train_config["output_path"])
-  copyfile("./config.yaml", os.path.join(train_config["output_path"], "ExperimentSummary.yaml"))
-
-  device = torch.device(train_config["device"])
-  print(f"[INFO] Running on {device}")
-
-  datasets = {
-    "train": pd.read_csv(os.path.join(train_config["data_path"], "train_df.csv")),
-    "test": pd.read_csv(os.path.join(train_config["data_path"], "test_df.csv")),
-  }
-
-  rating_counts = list(datasets['train']['rating'].value_counts().sort_index())
-  total_samples = len(datasets['train'])
-  weights = torch.FloatTensor([total_samples/(10 * rating_counts[i]) for i in range(10)]).to(device)
-
-  model = RatingPredictor(**config["model"]).to(device)
-  model.freeze_embedding_model(-2)
-
-  criterion = torch.nn.HuberLoss(delta=1.0, reduction='none')
-  optimizer = torch.optim.AdamW(model.parameters(), **train_config["optimizer_args"])
-  scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, **train_config["scheduler_args"]
-  )
-
-  tick = time()
-  best_epoch = -1
-  best_error = 999999
-  phases = ["train", "test"]
-  metrics = ["Loss", "RMSE", "MAE"]
-  metrics = {metric: {phase: [] for phase in phases} for metric in metrics}
-
-  for epoch in range(1, train_config["num_epochs"] + 1):
-    print("-" * 20)
-    print(f"Epoch {epoch} / {train_config['num_epochs']}")
-    for phase in phases:
-      dataset = datasets[phase]
-      if phase == "train":
-        model.train()
-        dataset = dataset.sample(frac=1).reset_index(drop=True)
-      else:
-        model.eval()
-
-      running_error = 0
-      running_mae = 0
-      running_rmse = 0
-      pbar = tqdm(range(0, len(dataset), train_config["batch_size"]), ncols=94)
-      with torch.set_grad_enabled(phase == "train"):
-        for i in pbar:
-          batch = dataset.iloc[i:i + train_config["batch_size"]]
-          reviews = batch["review_text"].tolist()
-          features = torch.from_numpy(batch.drop(["review_text", "rating"], axis=1).to_numpy()).float().to(device)
-          y = torch.from_numpy(batch["rating"].to_numpy()).long().to(device)
-
-          optimizer.zero_grad()
-          out = model(reviews, features)
-          out = out.squeeze()
-
-          # Weighted loss
-          loss = criterion(out, (y - 1) / 9)
-          sample_weights = weights[y - 1]
-          loss = (loss * sample_weights).mean()
-
-          if phase == "train":
-            loss.backward()
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-          # Calculate metrics
-          out = out * 9 + 1
-          mae = torch.abs(out - y).mean()
-          rmse = torch.sqrt(((out - y)**2).mean())
-          running_error += loss.item()
-          running_mae += mae.item()
-          running_rmse += rmse.item()
-          pbar.set_description(f"Loss: {loss.item():.3f} | MAE: {mae:.2f}")
-
-      num_batches = len(pbar)
-      running_error /= num_batches
-      running_mae /= num_batches
-      running_rmse /= num_batches
-      print(f"Loss: {running_error:.5f} | MAE: {running_mae:.3f} | RMSE: {running_rmse:.3f}")
-      metrics["Loss"][phase].append(running_error)
-      metrics["MAE"][phase].append(running_mae)
-      metrics["RMSE"][phase].append(running_rmse)
-
-      if phase == "test":
-        scheduler.step(running_error)
-        if running_error < best_error:
-          best_error = running_error
-          best_epoch = epoch
-          ckpt_path = os.path.join(train_config["output_path"], "checkpoint.pt")
-          print(f"+ Saving the model to {ckpt_path}...")
-          torch.save(model.state_dict(), ckpt_path)
-
-    # If no validation improvement has been recorded for "early_stop" number of epochs
-    # stop the training.
-    if epoch - best_epoch >= train_config["early_stop_patience"]:
-      print(f"No improvements in {train_config['early_stop_patience']} epochs, stop!")
-      break
-
-  total_time = time() - tick
-  m, s = divmod(total_time, 60)
-  h, m = divmod(m, 60)
-  print(f"Training took {int(h):d} hours {int(m):d} minutes {s:.2f} seconds.")
-
-  fig, axs = plt.subplots(1, len(metrics), tight_layout=True, figsize=(15, 5))
-  epochs = list(range(1, epoch + 1))
-  for i, (metric, arr) in enumerate(metrics.items()):
-    for phase, val in arr.items():
-      axs[i].plot(epochs, val, label=phase)
-    axs[i].set_xlabel("Epochs")
-    axs[i].set_ylabel(metric)
-    axs[i].legend()
-    axs[i].grid(True)
-  fig.suptitle("Model Performance Across Epochs")
-  plt.savefig(
-    os.path.join(train_config["output_path"], "performance_curves.png"), bbox_inches="tight"
-  )
+  from fire import Fire
+  Fire(main)
