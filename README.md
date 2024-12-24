@@ -5,7 +5,7 @@
 
 ### Usage
 
-##### Docker Container
+#### Docker Container
 Easiest way to run this project is using [docker](https://www.docker.com/). Install docker on your system and then run the following inside the project root:
 ```bash
 docker build -t review-rating-predictor .
@@ -61,7 +61,7 @@ Once this is up and running you can use the API to make requests. Currently it s
 ```
 Providing a model version is optional, if not provided the API will use the latest model for the query.
 
-##### Build Your Own Environment
+#### Build Your Own Environment
 Docker container deploys the prediction API, however if you want to train new models or introduce new pre-training steps you need to build your own virtual environment to do so:
 ```bash
 python3 -m virtualenv venv      # Create a virtual environment called 'venv'
