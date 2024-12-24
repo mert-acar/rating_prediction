@@ -30,17 +30,16 @@ def compute_sample_weights(ratings: np.ndarray) -> np.ndarray:
   return class_weights[ratings.astype(int) - 1]
 
 
-def main(data_dir: str = "../data/allMiniLM/"):
+def main(data_dir: str):
   train_feat, train_ratings, test_feat, test_ratings = load_data(data_dir)
   # sample_weights = compute_sample_weights(train_ratings)
 
   random_state = 9001
-  from sklearn.linear_model import HuberRegressor
-  model = HuberRegressor()
-  params = {
-      "epsilon": [1.1, 1.35, 1.5, 2.0],
-      "alpha": [0, 1e-4, 1e-3, 1e-2]
-  }
+  from sklearn.linear_model import Ridge
+  model = Ridge(random_state=random_state)
+  params = {"alpha": [0, 1e-4, 1e-3, 1e-2, 0.5, 1]}
+
+
   grid_search = GridSearchCV(
     model,
     params,
@@ -78,14 +77,14 @@ def main(data_dir: str = "../data/allMiniLM/"):
     print(f"  - MSE: {rating_mse:.4f}")
     print(f"  - MAE: {rating_mae:.4f}")
 
-  ans = input("\nSave model to the registry? [Y/n]: ")
-  if ans.lower() != "y":
-    return
-
   registry = ModelRegistry()
   if len(registry) > 0:
     print("\nCurrent Registry:")
-    registry.list_versions(True)
+    registry.print_versions()
+
+  ans = input("\nSave model to the registry? [Y/n]: ")
+  if ans.lower() != "y":
+    return
 
   preprocessor = joblib.load(os.path.join(data_dir, "preprocessor.joblib"))
   pipe = Pipeline([
@@ -102,7 +101,7 @@ def main(data_dir: str = "../data/allMiniLM/"):
 
   registry.register_model(
     pipe,
-    f"../models/model_v{version}",
+    f"model_v{version}",
     version,
     description,
     {
@@ -112,6 +111,9 @@ def main(data_dir: str = "../data/allMiniLM/"):
       "R2": float(np.round(r2, 3))
     },
   )
+  print(f"+ Model is registered and saved to {pipe}")
+  print("\nCurrent Registry:")
+  registry.print_versions()
 
 
 if __name__ == "__main__":

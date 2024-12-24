@@ -22,7 +22,6 @@ class PredictionRequest(BaseModel):
 
 class PredictionResponse(BaseModel):
   predicted_rating: float
-  model_version: str
 
 
 @app.post("/predict", response_model=PredictionResponse)
@@ -46,7 +45,7 @@ async def predict(request: PredictionRequest) -> PredictionResponse:
 
 @app.get("/models")
 async def list_models():
-  return model_registry.list_versions()
+  return model_registry.get_versions()
 
 
 if __name__ == "__main__":

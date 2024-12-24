@@ -8,10 +8,6 @@ from sklearn.compose import ColumnTransformer
 from sentence_transformers import SentenceTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, OneHotEncoder
-from sklearn.utils.validation import check_is_fitted
-
-# TODO:
-# + Dont normalize the embeddings
 
 
 class TextCleaner(BaseEstimator, TransformerMixin):
@@ -75,7 +71,7 @@ class LLMEncoder(BaseEstimator, TransformerMixin):
   def fit(self, X, y=None):
     try:
       if self.encoding_model is None:
-        self.encoding_model = SentenceTransformer(self.encoding_model_name)
+        self.encoding_model = SentenceTransformer(self.encoding_model_name).to("cpu")
         self.is_fitted_ = True
     except Exception as e:
       print(f"Error loading model: {str(e)}")
@@ -88,7 +84,7 @@ class LLMEncoder(BaseEstimator, TransformerMixin):
       raise ValueError("Model not initialized. Call fit() first.")
 
     return self.encoding_model.encode(
-      X, convert_to_numpy=True, normalize_embeddings=False, show_progress_bar=False
+      X, convert_to_numpy=True, normalize_embeddings=True, device="cpu"
     )
 
 
@@ -178,11 +174,16 @@ if __name__ == "__main__":
   random_state = 9001
   discount_bins = (0.0, 0.2, 0.6, 1.0)
   top_categories = ['Sports & Outdoors', 'Health & Personal Care', 'AMAZON FASHION']
-  encoding_model_name = "all-MiniLM-L6-v2"
-  output_dir = "../data/allMiniLM_NN/"
+  encoding_model_name = "all-mpnet-base-v2"
+  data_dir = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "../data/")
+  )
+  output_dir = "allMpnetBasev2"
+
+  output_dir = os.path.join(data_dir, output_dir)
   os.makedirs(output_dir, exist_ok=True)
 
-  df = pd.read_csv("../data/product_user_reviews.csv")
+  df = pd.read_csv(os.path.join(data_dir, "product_user_reviews.csv"))
   X, y = df.drop("rating", axis=1), df[["rating"]]
   X_train, X_test, y_train, y_test = train_test_split(
     X, y, stratify=y, test_size=test_size, random_state=random_state

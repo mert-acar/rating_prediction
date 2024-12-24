@@ -11,12 +11,11 @@ from sklearn.pipeline import Pipeline
 class TestModelRegistry(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
-    root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cls.registry = ModelRegistry(os.path.join(root_path, "models"))
+    cls.registry = ModelRegistry()
 
   def test_model_registry(self):
     version = "UNITTEST"
-    self.registry.register_model(Pipeline([]), "./temp_pipe", version, "temp test", {})
+    self.registry.register_model(Pipeline([]), "temp_pipe", version, "temp test", {})
     ver = self.registry.get_latest_version()
     self.assertEqual(ver, version)
     self.registry.delete_model(version)
