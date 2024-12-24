@@ -73,7 +73,7 @@ This is a one-time step, once the virtual environment is setup, you can just act
 
 In order to **serve the API**, run:
 ```bash
-python3 src/api.py
+python3 src/api.py # or ./serve.sh
 ```
 Once the API is served, you can use the same curl commands to run queries.
 
