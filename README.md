@@ -1,6 +1,5 @@
-# Invent Analytics - ML Engineer Case Study
+# Amazon Rating Prediction - Case Study
 
-**Submitted by:** Mert Acar
 **Date:** Dec 24, 2024
 
 ### Usage
